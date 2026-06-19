@@ -14,6 +14,8 @@
       </div>
     </header>
 
+    <SceneBar @apply-scene="handleApplyScene" />
+
     <main class="main-content" role="main" aria-label="主要内容区域">
       <div class="hero-section">
         <h2 role="heading" aria-level="2">打造您的睡眠环境</h2>
@@ -41,10 +43,11 @@
 
 <script setup lang="ts">
 import { onMounted } from 'vue'
-import { useAudioStore } from '@/stores/audioStore'
+import { useAudioStore, type ScenePreset } from '@/stores/audioStore'
 import { useAudioEngine } from '@/composables/useAudioEngine'
 import SoundCard from '@/components/SoundCard.vue'
 import PlayerBar from '@/components/PlayerBar.vue'
+import SceneBar from '@/components/SceneBar.vue'
 import { Moon } from '@element-plus/icons-vue'
 
 const store = useAudioStore()
@@ -54,11 +57,15 @@ const {
   updateTrackVolume,
   toggleGlobalPlay,
   startTimer,
-  cancelTimer
+  cancelTimer,
+  applyScene
 } = useAudioEngine()
 
+const handleApplyScene = (scene: ScenePreset) => {
+  applyScene(scene)
+}
+
 onMounted(() => {
-  // 首次用户交互初始化 AudioContext
   document.addEventListener('click', () => initAudioContext(), { once: true })
 })
 </script>
@@ -66,7 +73,7 @@ onMounted(() => {
 <style scoped lang="scss">
 .app-container {
   background: radial-gradient(circle at top center, #1e293b 0%, #0f172a 100%);
-  padding-bottom: 100px; /* Space for player bar */
+  padding-bottom: 100px;
 }
 
 .app-header {
@@ -122,7 +129,7 @@ onMounted(() => {
 
 .hero-section {
   text-align: center;
-  padding: 64px 0 48px;
+  padding: 48px 0 32px;
 
   h2 {
     font-size: 42px;
@@ -152,7 +159,7 @@ onMounted(() => {
 
 @media (max-width: 768px) {
   .hero-section {
-    padding: 40px 0 32px;
+    padding: 32px 0 24px;
 
     h2 {
       font-size: 32px;
