@@ -1,13 +1,12 @@
 import { ref, watch, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useAudioStore, type SoundTrack } from '@/stores/audioStore'
+import { useAudioStore, type SoundTrack, type Scene } from '@/stores/audioStore'
 import { useAudioGenerator, type GeneratedAudio } from './useAudioGenerator'
 
 export function useAudioEngine() {
   const store = useAudioStore()
   const audioGenerator = useAudioGenerator()
 
-  // Web Audio API Context
   const audioContext = ref<AudioContext | null>(null)
   const gainNodes = new Map<string, GainNode>()
   const audioElements = new Map<string, HTMLAudioElement>()
@@ -15,6 +14,7 @@ export function useAudioEngine() {
   const masterGain = ref<GainNode | null>(null)
 
   let timerInterval: any = null
+  let fadeTimeouts: any[] = []
 
   // 初始化音频引擎
   const initAudioContext = () => {
@@ -126,23 +126,21 @@ export function useAudioEngine() {
   }
 
   // 内部：播放逻辑 - 优先使用生成的音频，失败则尝试外部 URL
-  const playTrackAudio = async (track: SoundTrack) => {
+  const playTrackAudio = async (track: SoundTrack, startSilent: boolean = false) => {
     if (!audioContext.value || !masterGain.value) return
 
-    // 如果已经存在，先清理
     if (audioElements.has(track.id) || generatedSources.has(track.id)) return
 
+    const initialGain = startSilent ? 0 : track.volume / 100
+
     try {
-      // 优先使用生成的音频（不依赖外部 URL）
       const generated = audioGenerator.generateAudioForTrack(audioContext.value, track.id)
 
       const trackGain = audioContext.value.createGain()
-      trackGain.gain.value = track.volume / 100
+      trackGain.gain.value = initialGain
 
-      // 连接音频链（支持多层滤波器）
       let lastNode: AudioNode = generated.source
 
-      // 如果有多个滤波器，需要按顺序连接
       if (generated.filter) {
         generated.source.connect(generated.filter)
         lastNode = generated.filter
@@ -157,7 +155,6 @@ export function useAudioEngine() {
 
       trackGain.connect(masterGain.value)
 
-      // 启动生成的音频源（LFO 在生成时已经启动，这里只需要启动音频源）
       if ('start' in generated.source && typeof generated.source.start === 'function') {
         try {
           generated.source.start(0)
@@ -167,7 +164,6 @@ export function useAudioEngine() {
             duration: 3000,
             showClose: true
           })
-          // 回退：停止该轨道
           track.isPlaying = false
           updateGlobalState()
         }
@@ -177,7 +173,6 @@ export function useAudioEngine() {
       gainNodes.set(track.id, trackGain)
 
     } catch (error) {
-      // 生成音频失败，尝试使用默认白噪音作为回退
       try {
         ElMessage.warning({
           message: `${track.name} 加载失败，已切换到默认音效`,
@@ -185,17 +180,15 @@ export function useAudioEngine() {
           showClose: true
         })
 
-        // 使用默认白噪音作为回退
         const fallback = audioGenerator.generateWhiteNoise(audioContext.value)
         const trackGain = audioContext.value.createGain()
-        trackGain.gain.value = track.volume / 100
+        trackGain.gain.value = initialGain
         fallback.connect(trackGain)
         trackGain.connect(masterGain.value)
         fallback.start(0)
         generatedSources.set(track.id, { source: fallback })
         gainNodes.set(track.id, trackGain)
       } catch (fallbackError) {
-        // 如果回退也失败，显示错误并停止该轨道
         ElMessage.error({
           message: `无法播放 ${track.name}，请稍后重试`,
           duration: 4000,
@@ -436,11 +429,109 @@ export function useAudioEngine() {
     store.isGlobalPlaying = store.tracks.some(t => t.isPlaying)
   }
 
-  // 监听 Store 变化
+  const clearFadeTimeouts = () => {
+    fadeTimeouts.forEach(t => clearTimeout(t))
+    fadeTimeouts = []
+  }
+
+  const fadeOutAllTracks = (duration: number = 500): Promise<void> => {
+    return new Promise((resolve) => {
+      if (!audioContext.value || gainNodes.size === 0) {
+        resolve()
+        return
+      }
+
+      const currentTime = audioContext.value.currentTime
+      const playingTrackIds = Array.from(gainNodes.keys())
+
+      if (playingTrackIds.length === 0) {
+        resolve()
+        return
+      }
+
+      playingTrackIds.forEach(trackId => {
+        const gainNode = gainNodes.get(trackId)
+        if (gainNode) {
+          gainNode.gain.cancelScheduledValues(currentTime)
+          gainNode.gain.setValueAtTime(gainNode.gain.value, currentTime)
+          gainNode.gain.linearRampToValueAtTime(0, currentTime + duration / 1000)
+        }
+      })
+
+      const timeout = setTimeout(() => {
+        playingTrackIds.forEach(trackId => {
+          stopTrackAudio(trackId)
+          const track = store.tracks.find(t => t.id === trackId)
+          if (track) track.isPlaying = false
+        })
+        resolve()
+      }, duration + 50)
+      fadeTimeouts.push(timeout)
+    })
+  }
+
+  const fadeInTracks = async (sceneTracks: Array<{ id: string; volume: number }>, duration: number = 800) => {
+    initAudioContext()
+    if (!audioContext.value || !masterGain.value) return
+
+    store.isGlobalPlaying = true
+
+    const validTracks = sceneTracks
+      .map(st => {
+        const track = store.tracks.find(t => t.id === st.id)
+        return track ? { track, targetVolume: st.volume } : null
+      })
+      .filter(Boolean) as Array<{ track: SoundTrack; targetVolume: number }>
+
+    validTracks.forEach(({ track, targetVolume }) => {
+      track.volume = targetVolume
+      track.isPlaying = true
+    })
+
+    await Promise.all(validTracks.map(({ track }) => playTrackAudio(track, true)))
+
+    const currentTime = audioContext.value.currentTime
+    const fadeEndTime = currentTime + duration / 1000
+
+    validTracks.forEach(({ track, targetVolume }) => {
+      const gainNode = gainNodes.get(track.id)
+      if (gainNode) {
+        gainNode.gain.cancelScheduledValues(currentTime)
+        gainNode.gain.setValueAtTime(0, currentTime)
+        gainNode.gain.linearRampToValueAtTime(targetVolume / 100, fadeEndTime)
+      }
+    })
+
+    updateGlobalState()
+  }
+
+  const applyScene = async (scene: Scene) => {
+    if (store.isTransitioning) return
+    store.setTransitioning(true)
+    store.setActiveScene(scene.id)
+
+    try {
+      await fadeOutAllTracks(600)
+
+      await new Promise(resolve => setTimeout(resolve, 100))
+
+      await fadeInTracks(scene.tracks, 800)
+    } finally {
+      store.setTransitioning(false)
+    }
+  }
+
+  const getCurrentTrackStates = (): Array<{ id: string; volume: number }> => {
+    return store.tracks
+      .filter(t => t.isPlaying && t.volume > 0)
+      .map(t => ({ id: t.id, volume: t.volume }))
+  }
+
   watch(() => store.masterVolume, (newVal) => updateMasterVolume(newVal))
 
   onUnmounted(() => {
     if (timerInterval) clearInterval(timerInterval)
+    clearFadeTimeouts()
     audioElements.forEach(audio => audio.pause())
     generatedSources.forEach((gen) => {
       if ('stop' in gen.source && typeof gen.source.stop === 'function') {
@@ -458,6 +549,8 @@ export function useAudioEngine() {
     updateTrackVolume,
     toggleGlobalPlay,
     startTimer,
-    cancelTimer
+    cancelTimer,
+    applyScene,
+    getCurrentTrackStates
   }
 }
