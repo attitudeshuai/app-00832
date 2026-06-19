@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  dreamstream-web:
+    build: ./frontend-admin
+    container_name: dreamstream-web
+    ports:
+      - "8082:80"
+    restart: always

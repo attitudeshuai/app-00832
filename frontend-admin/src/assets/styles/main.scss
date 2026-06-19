@@ -1,0 +1,49 @@
+@import './variables.scss';
+
+.app-container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.main-content {
+  flex: 1;
+  padding: 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 卡片通用样式 */
+.feature-card {
+  background-color: $bg-secondary !important;
+  border: 1px solid rgba(255, 255, 255, 0.05) !important;
+  color: $text-primary !important;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+
+  &:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3) !important;
+  }
+}
+
+/* 覆盖 Element Plus 样式以适应深色主题 */
+.el-card {
+  border-radius: 16px !important;
+  background-color: $bg-secondary;
+  border: none;
+}
+
+.el-slider__bar {
+  background-color: $accent-color;
+}
+
+.el-button--primary {
+  background-color: $accent-color !important;
+  border-color: $accent-color !important;
+
+  &:hover {
+    opacity: 0.9;
+  }
+}
