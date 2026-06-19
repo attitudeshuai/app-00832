@@ -14,8 +14,10 @@
       </div>
     </header>
 
+    <SceneBar @switch-scene="handleSwitchScene" />
+
     <main class="main-content" role="main" aria-label="主要内容区域">
-      <div class="hero-section">
+      <div class="hero-section" v-if="false">
         <h2 role="heading" aria-level="2">打造您的睡眠环境</h2>
         <p>混合环境音效，为您营造完美的放松与睡眠氛围。</p>
       </div>
@@ -24,8 +26,8 @@
         <el-col :xs="24" :sm="12" :md="8" :lg="6" v-for="track in store.tracks" :key="track.id" class="mb-4" role="listitem">
           <SoundCard
             :track="track"
-            :on-toggle="toggleTrack"
-            :on-volume-change="updateTrackVolume"
+            :on-toggle="handleTrackToggle"
+            :on-volume-change="handleTrackVolumeChange"
           />
         </el-col>
       </el-row>
@@ -45,6 +47,7 @@ import { useAudioStore } from '@/stores/audioStore'
 import { useAudioEngine } from '@/composables/useAudioEngine'
 import SoundCard from '@/components/SoundCard.vue'
 import PlayerBar from '@/components/PlayerBar.vue'
+import SceneBar from '@/components/SceneBar.vue'
 import { Moon } from '@element-plus/icons-vue'
 
 const store = useAudioStore()
@@ -54,11 +57,25 @@ const {
   updateTrackVolume,
   toggleGlobalPlay,
   startTimer,
-  cancelTimer
+  cancelTimer,
+  switchToScene
 } = useAudioEngine()
 
+const handleTrackToggle = (trackId: string) => {
+  store.clearActiveScene()
+  toggleTrack(trackId)
+}
+
+const handleTrackVolumeChange = (trackId: string, volume: number) => {
+  store.clearActiveScene()
+  updateTrackVolume(trackId, volume)
+}
+
+const handleSwitchScene = (sceneId: string) => {
+  switchToScene(sceneId)
+}
+
 onMounted(() => {
-  // 首次用户交互初始化 AudioContext
   document.addEventListener('click', () => initAudioContext(), { once: true })
 })
 </script>
@@ -66,11 +83,11 @@ onMounted(() => {
 <style scoped lang="scss">
 .app-container {
   background: radial-gradient(circle at top center, #1e293b 0%, #0f172a 100%);
-  padding-bottom: 100px; /* Space for player bar */
+  padding-bottom: 100px;
 }
 
 .app-header {
-  height: 72px;
+  height: 64px;
   background: rgba(15, 23, 42, 0.6);
   backdrop-filter: blur(12px);
   position: sticky;
@@ -91,13 +108,13 @@ onMounted(() => {
   .logo {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 12px;
 
     .logo-icon {
-      width: 40px;
-      height: 40px;
+      width: 36px;
+      height: 36px;
       background: linear-gradient(135deg, #818cf8, #6366f1);
-      border-radius: 12px;
+      border-radius: 10px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -105,7 +122,7 @@ onMounted(() => {
     }
 
     h1 {
-      font-size: 24px;
+      font-size: 20px;
       font-weight: 700;
       margin: 0;
       color: #f8fafc;
@@ -142,6 +159,10 @@ onMounted(() => {
   }
 }
 
+.main-content {
+  padding-top: 24px;
+}
+
 .sound-grid {
   padding: 0 12px;
 }
@@ -151,6 +172,24 @@ onMounted(() => {
 }
 
 @media (max-width: 768px) {
+  .app-header {
+    height: 56px;
+
+    .header-content {
+      padding: 0 16px;
+    }
+
+    .logo {
+      h1 {
+        font-size: 18px;
+      }
+    }
+  }
+
+  .main-content {
+    padding-top: 16px;
+  }
+
   .hero-section {
     padding: 40px 0 32px;
 

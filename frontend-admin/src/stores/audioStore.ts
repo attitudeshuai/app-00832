@@ -6,20 +6,31 @@ export interface SoundTrack {
   id: string
   name: string
   icon: string
-  url: string // 实际项目中应为真实音频地址，这里用占位符
+  url: string
   volume: number
   isPlaying: boolean
   category: 'nature' | 'noise' | 'music'
 }
 
+export interface ScenePreset {
+  id: string
+  name: string
+  icon: string
+  isDefault: boolean
+  tracks: Array<{ id: string; volume: number; isPlaying: boolean }>
+  masterVolume: number
+  createdAt: number
+}
+
 interface StoredPreferences {
   tracks: Array<{ id: string; volume: number }>
   masterVolume: number
+  customScenes?: ScenePreset[]
 }
 
 const STORAGE_KEY = 'dreamstream_preferences'
+const SCENES_STORAGE_KEY = 'dreamstream_scenes'
 
-// 从 localStorage 加载用户偏好
 function loadPreferences(): Partial<StoredPreferences> {
   try {
     const stored = localStorage.getItem(STORAGE_KEY)
@@ -27,30 +38,127 @@ function loadPreferences(): Partial<StoredPreferences> {
       return JSON.parse(stored)
     }
   } catch {
-    // localStorage 加载失败（可能是被禁用或数据损坏），使用默认值
-    // 静默处理，不影响用户体验
   }
   return {}
 }
 
-// 保存用户偏好到 localStorage
-let saveErrorShown = false // 避免重复提示
+function loadCustomScenes(): ScenePreset[] {
+  try {
+    const stored = localStorage.getItem(SCENES_STORAGE_KEY)
+    if (stored) {
+      return JSON.parse(stored)
+    }
+  } catch {
+  }
+  return []
+}
+
+let saveErrorShown = false
 function savePreferences(preferences: StoredPreferences) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(preferences))
-    saveErrorShown = false // 保存成功，重置错误标志
+    saveErrorShown = false
   } catch {
-    // localStorage 保存失败（可能是被禁用或存储空间已满）
     if (!saveErrorShown) {
       ElMessage.warning({
         message: '无法保存设置，请检查浏览器是否允许本地存储',
         duration: 4000,
         showClose: true
       })
-      saveErrorShown = true // 避免重复提示
+      saveErrorShown = true
     }
   }
 }
+
+function saveCustomScenes(scenes: ScenePreset[]) {
+  try {
+    localStorage.setItem(SCENES_STORAGE_KEY, JSON.stringify(scenes))
+    saveErrorShown = false
+  } catch {
+    if (!saveErrorShown) {
+      ElMessage.warning({
+        message: '无法保存场景，请检查浏览器是否允许本地存储',
+        duration: 4000,
+        showClose: true
+      })
+      saveErrorShown = true
+    }
+  }
+}
+
+const defaultScenes: ScenePreset[] = [
+  {
+    id: 'rain-night',
+    name: '雨夜安眠',
+    icon: 'Pouring',
+    isDefault: true,
+    tracks: [
+      { id: 'rain', volume: 70, isPlaying: true },
+      { id: 'piano', volume: 30, isPlaying: true }
+    ],
+    masterVolume: 75,
+    createdAt: 0
+  },
+  {
+    id: 'forest-dawn',
+    name: '森林清晨',
+    icon: 'Sunrise',
+    isDefault: true,
+    tracks: [
+      { id: 'forest', volume: 65, isPlaying: true },
+      { id: 'piano', volume: 25, isPlaying: true }
+    ],
+    masterVolume: 70,
+    createdAt: 0
+  },
+  {
+    id: 'fireplace',
+    name: '温暖篝火',
+    icon: 'Lightning',
+    isDefault: true,
+    tracks: [
+      { id: 'fire', volume: 75, isPlaying: true },
+      { id: 'forest', volume: 30, isPlaying: true }
+    ],
+    masterVolume: 65,
+    createdAt: 0
+  },
+  {
+    id: 'ocean-waves',
+    name: '海浪轻拍',
+    icon: 'Sunset',
+    isDefault: true,
+    tracks: [
+      { id: 'waves', volume: 80, isPlaying: true },
+      { id: 'white-noise', volume: 20, isPlaying: true }
+    ],
+    masterVolume: 70,
+    createdAt: 0
+  },
+  {
+    id: 'focus-white',
+    name: '专注白噪',
+    icon: 'MagicStick',
+    isDefault: true,
+    tracks: [
+      { id: 'white-noise', volume: 55, isPlaying: true }
+    ],
+    masterVolume: 60,
+    createdAt: 0
+  },
+  {
+    id: 'piano-relax',
+    name: '钢琴放松',
+    icon: 'Notification',
+    isDefault: true,
+    tracks: [
+      { id: 'piano', volume: 60, isPlaying: true },
+      { id: 'rain', volume: 25, isPlaying: true }
+    ],
+    masterVolume: 65,
+    createdAt: 0
+  }
+]
 
 export const useAudioStore = defineStore('audio', () => {
   // 从 localStorage 加载保存的偏好
@@ -86,38 +194,122 @@ export const useAudioStore = defineStore('audio', () => {
 
   const masterVolume = ref(savedPrefs.masterVolume ?? 80)
   const isGlobalPlaying = ref(false)
-  const timerDuration = ref<number | null>(null) // 分钟
-  const timerRemaining = ref<number | null>(null) // 秒
+  const timerDuration = ref<number | null>(null)
+  const timerRemaining = ref<number | null>(null)
+  const activeSceneId = ref<string | null>(null)
+  const isTransitioning = ref(false)
 
-  // 计算属性：当前播放的轨道数量
+  const savedCustomScenes = loadCustomScenes()
+  const customScenes = ref<ScenePreset[]>(savedCustomScenes)
+
+  const allScenes = computed(() => [...defaultScenes, ...customScenes.value])
   const activeTracksCount = computed(() => tracks.value.filter(t => t.isPlaying).length)
+  const activeScene = computed(() => allScenes.value.find(s => s.id === activeSceneId.value) || null)
 
-  // 保存偏好到 localStorage（防抖处理，避免频繁写入）
-  let saveTimeout: any = null
+  let savePrefsTimeout: any = null
+  let saveScenesTimeout: any = null
+
   const savePreferencesDebounced = () => {
-    if (saveTimeout) clearTimeout(saveTimeout)
-    saveTimeout = setTimeout(() => {
+    if (savePrefsTimeout) clearTimeout(savePrefsTimeout)
+    savePrefsTimeout = setTimeout(() => {
       const prefs: StoredPreferences = {
         tracks: tracks.value.map(t => ({ id: t.id, volume: t.volume })),
         masterVolume: masterVolume.value
       }
       savePreferences(prefs)
-    }, 300) // 300ms 防抖
+    }, 300)
   }
 
-  // 监听轨道音量变化
+  const saveScenesDebounced = () => {
+    if (saveScenesTimeout) clearTimeout(saveScenesTimeout)
+    saveScenesTimeout = setTimeout(() => {
+      saveCustomScenes(customScenes.value)
+    }, 300)
+  }
+
   watch(
     () => tracks.value.map(t => ({ id: t.id, volume: t.volume })),
-    () => {
-      savePreferencesDebounced()
-    },
+    () => savePreferencesDebounced(),
     { deep: true }
   )
 
-  // 监听主音量变化
-  watch(masterVolume, () => {
-    savePreferencesDebounced()
-  })
+  watch(masterVolume, () => savePreferencesDebounced())
+  watch(customScenes, () => saveScenesDebounced(), { deep: true })
+
+  const saveCurrentAsScene = (name: string, icon: string = 'Star') => {
+    const newScene: ScenePreset = {
+      id: `custom-${Date.now()}`,
+      name: name.trim(),
+      icon,
+      isDefault: false,
+      tracks: tracks.value
+        .filter(t => t.isPlaying)
+        .map(t => ({ id: t.id, volume: t.volume, isPlaying: true })),
+      masterVolume: masterVolume.value,
+      createdAt: Date.now()
+    }
+    customScenes.value.push(newScene)
+    activeSceneId.value = newScene.id
+    ElMessage.success(`场景「${newScene.name}」已保存`)
+    return newScene
+  }
+
+  const renameScene = (sceneId: string, newName: string) => {
+    const scene = customScenes.value.find(s => s.id === sceneId)
+    if (scene && !scene.isDefault) {
+      scene.name = newName.trim()
+      ElMessage.success('场景已重命名')
+    }
+  }
+
+  const deleteScene = (sceneId: string) => {
+    const index = customScenes.value.findIndex(s => s.id === sceneId)
+    if (index !== -1) {
+      const scene = customScenes.value[index]
+      if (!scene.isDefault) {
+        customScenes.value.splice(index, 1)
+        if (activeSceneId.value === sceneId) {
+          activeSceneId.value = null
+        }
+        ElMessage.success(`场景「${scene.name}」已删除`)
+      }
+    }
+  }
+
+  const prepareSceneTransition = (sceneId: string) => {
+    const scene = allScenes.value.find(s => s.id === sceneId)
+    if (!scene) return null
+    isTransitioning.value = true
+    return scene
+  }
+
+  const applySceneState = (sceneId: string) => {
+    const scene = allScenes.value.find(s => s.id === sceneId)
+    if (!scene) return
+
+    activeSceneId.value = sceneId
+    masterVolume.value = scene.masterVolume
+
+    tracks.value.forEach(track => {
+      const sceneTrack = scene.tracks.find(st => st.id === track.id)
+      if (sceneTrack) {
+        track.isPlaying = sceneTrack.isPlaying
+        track.volume = sceneTrack.volume
+      } else {
+        track.isPlaying = false
+      }
+    })
+
+    isTransitioning.value = false
+  }
+
+  const finishSceneTransition = () => {
+    isTransitioning.value = false
+  }
+
+  const clearActiveScene = () => {
+    activeSceneId.value = null
+  }
 
   return {
     tracks,
@@ -125,6 +317,18 @@ export const useAudioStore = defineStore('audio', () => {
     isGlobalPlaying,
     timerDuration,
     timerRemaining,
-    activeTracksCount
+    activeTracksCount,
+    customScenes,
+    allScenes,
+    activeSceneId,
+    activeScene,
+    isTransitioning,
+    saveCurrentAsScene,
+    renameScene,
+    deleteScene,
+    prepareSceneTransition,
+    applySceneState,
+    finishSceneTransition,
+    clearActiveScene
   }
 })
