@@ -1,18 +1,23 @@
 import { ref, watch, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useAudioStore, type SoundTrack } from '@/stores/audioStore'
+import { useAudioStore, type SoundTrack, type Scene } from '@/stores/audioStore'
 import { useAudioGenerator, type GeneratedAudio } from './useAudioGenerator'
+
+// 淡出/淡入时长（秒）。淡出后追加一小段静音时间，确保音频缓冲彻底排空再停止音源，避免咔嗒声
+const FADE_OUT_DURATION = 1.2
+const FADE_IN_DURATION = 1.0
+const SILENCE_TAIL = 0.08
 
 export function useAudioEngine() {
   const store = useAudioStore()
   const audioGenerator = useAudioGenerator()
 
-  // Web Audio API Context
   const audioContext = ref<AudioContext | null>(null)
   const gainNodes = new Map<string, GainNode>()
   const audioElements = new Map<string, HTMLAudioElement>()
   const generatedSources = new Map<string, GeneratedAudio>()
   const masterGain = ref<GainNode | null>(null)
+  let isSwitchingScene = false
 
   let timerInterval: any = null
 
@@ -126,7 +131,8 @@ export function useAudioEngine() {
   }
 
   // 内部：播放逻辑 - 优先使用生成的音频，失败则尝试外部 URL
-  const playTrackAudio = async (track: SoundTrack) => {
+  // startMuted=true 时，音源启动前先把增益置零，避免出现先响一声再淡入的突跳
+  const playTrackAudio = async (track: SoundTrack, startMuted = false) => {
     if (!audioContext.value || !masterGain.value) return
 
     // 如果已经存在，先清理
@@ -137,7 +143,10 @@ export function useAudioEngine() {
       const generated = audioGenerator.generateAudioForTrack(audioContext.value, track.id)
 
       const trackGain = audioContext.value.createGain()
-      trackGain.gain.value = track.volume / 100
+      // 关键：在连接和启动音源之前先把增益锁定到 0 或目标值
+      // 启动后再由调用方做平滑渐变，避免"先响一声再淡入"
+      const initialGain = startMuted ? 0 : track.volume / 100
+      trackGain.gain.setValueAtTime(initialGain, audioContext.value.currentTime)
 
       // 连接音频链（支持多层滤波器）
       let lastNode: AudioNode = generated.source
@@ -157,6 +166,10 @@ export function useAudioEngine() {
 
       trackGain.connect(masterGain.value)
 
+      // 先把节点登记好，再启动音源，确保即便启动瞬间触发回调也能找到 gainNode
+      generatedSources.set(track.id, generated)
+      gainNodes.set(track.id, trackGain)
+
       // 启动生成的音频源（LFO 在生成时已经启动，这里只需要启动音频源）
       if ('start' in generated.source && typeof generated.source.start === 'function') {
         try {
@@ -173,9 +186,6 @@ export function useAudioEngine() {
         }
       }
 
-      generatedSources.set(track.id, generated)
-      gainNodes.set(track.id, trackGain)
-
     } catch (error) {
       // 生成音频失败，尝试使用默认白噪音作为回退
       try {
@@ -188,12 +198,13 @@ export function useAudioEngine() {
         // 使用默认白噪音作为回退
         const fallback = audioGenerator.generateWhiteNoise(audioContext.value)
         const trackGain = audioContext.value.createGain()
-        trackGain.gain.value = track.volume / 100
+        const initialGain = startMuted ? 0 : track.volume / 100
+        trackGain.gain.setValueAtTime(initialGain, audioContext.value.currentTime)
         fallback.connect(trackGain)
         trackGain.connect(masterGain.value)
-        fallback.start(0)
         generatedSources.set(track.id, { source: fallback })
         gainNodes.set(track.id, trackGain)
+        fallback.start(0)
       } catch (fallbackError) {
         // 如果回退也失败，显示错误并停止该轨道
         ElMessage.error({
@@ -436,8 +447,199 @@ export function useAudioEngine() {
     store.isGlobalPlaying = store.tracks.some(t => t.isPlaying)
   }
 
-  // 监听 Store 变化
-  watch(() => store.masterVolume, (newVal) => updateMasterVolume(newVal))
+  const fadeOutAllTracks = (): Promise<void> => {
+    return new Promise((resolve) => {
+      if (!audioContext.value) {
+        resolve()
+        return
+      }
+
+      const ctx = audioContext.value
+      const now = ctx.currentTime
+      const fadeEnd = now + FADE_OUT_DURATION
+
+      // 收集所有需要停止的资源快照，避免在异步等待期间被其他逻辑修改
+      const fadingGainNodes = Array.from(gainNodes.entries())
+      const fadingSources = Array.from(generatedSources.entries())
+      const fadingAudioElements = Array.from(audioElements.entries())
+      const fadingTrackIds = store.tracks.filter(t => t.isPlaying).map(t => t.id)
+
+      // 使用 linearRampToValueAtTime 让音量真正线性降到 0，
+      // 而不是 setTargetAtTime 的指数衰减（指数衰减永远逼近不了 0，会留下残响导致 stop 时咔嗒）
+      fadingGainNodes.forEach(([, gainNode]) => {
+        try {
+          // 先取消之前的自动化曲线，并锚定当前值，确保渐变曲线从当前真实音量开始
+          gainNode.gain.cancelScheduledValues(now)
+          gainNode.gain.setValueAtTime(gainNode.gain.value, now)
+          gainNode.gain.linearRampToValueAtTime(0.0001, fadeEnd)
+          gainNode.gain.setValueAtTime(0, fadeEnd)
+        } catch {
+          // 忽略已断开节点的错误
+        }
+      })
+
+      if (masterGain.value) {
+        try {
+          masterGain.value.gain.cancelScheduledValues(now)
+          masterGain.value.gain.setValueAtTime(masterGain.value.gain.value, now)
+          masterGain.value.gain.linearRampToValueAtTime(0.0001, fadeEnd)
+          masterGain.value.gain.setValueAtTime(0, fadeEnd)
+        } catch {
+          // 忽略
+        }
+      }
+
+      // 立即从 Map 中移除引用，避免下一阶段 fadeIn 复用同一 trackId 时冲突
+      fadingTrackIds.forEach(id => {
+        gainNodes.delete(id)
+        generatedSources.delete(id)
+        audioElements.delete(id)
+      })
+
+      // 等到 fade 完成 + 一小段静音保护期之后再 stop 音源
+      // 这样停止时增益已是 0，缓冲区也已排空，不会产生咔嗒声
+      const totalWaitMs = (FADE_OUT_DURATION + SILENCE_TAIL) * 1000
+      setTimeout(() => {
+        // 停止外部 audio
+        fadingAudioElements.forEach(([, audio]) => {
+          try {
+            audio.pause()
+            audio.currentTime = 0
+          } catch {
+            // 忽略
+          }
+        })
+
+        // 停止生成的音频源 + LFO，并断开连接
+        fadingSources.forEach(([, generated]) => {
+          if (generated.lfo) {
+            try {
+              if ('stop' in generated.lfo && typeof generated.lfo.stop === 'function') {
+                generated.lfo.stop(0)
+              }
+              if ('disconnect' in generated.lfo && typeof generated.lfo.disconnect === 'function') {
+                generated.lfo.disconnect()
+              }
+            } catch {
+              // 忽略已停止的源
+            }
+          }
+
+          if (generated.source) {
+            try {
+              if ('stop' in generated.source && typeof generated.source.stop === 'function') {
+                generated.source.stop(0)
+              }
+              if ('disconnect' in generated.source && typeof generated.source.disconnect === 'function') {
+                generated.source.disconnect()
+              }
+            } catch {
+              // 忽略
+            }
+          }
+
+          if (generated.filter) {
+            try { generated.filter.disconnect() } catch { /* 忽略 */ }
+          }
+          if (generated.gain) {
+            try { generated.gain.disconnect() } catch { /* 忽略 */ }
+          }
+        })
+
+        // 断开 trackGain
+        fadingGainNodes.forEach(([, gainNode]) => {
+          try { gainNode.disconnect() } catch { /* 忽略 */ }
+        })
+
+        // 更新 store 状态
+        store.tracks.forEach(t => {
+          if (fadingTrackIds.includes(t.id)) {
+            t.isPlaying = false
+          }
+        })
+
+        resolve()
+      }, totalWaitMs)
+    })
+  }
+
+  const fadeInTracksForScene = async (scene: Scene) => {
+    if (!audioContext.value || !masterGain.value) return
+
+    const ctx = audioContext.value
+
+    // 1) 先准备好所有音轨的 gainNode（启动前增益锁 0），避免任何启动瞬间的爆音
+    for (const sceneTrack of scene.tracks) {
+      const track = store.tracks.find(t => t.id === sceneTrack.id)
+      if (!track) continue
+
+      track.volume = sceneTrack.volume
+      track.isPlaying = true
+
+      // startMuted=true：playTrackAudio 内部会用 setValueAtTime(0, now) 锁定增益再启动音源
+      await playTrackAudio(track, true)
+    }
+
+    // 2) 所有音源都已启动且静音，现在做整体的线性淡入
+    const now = ctx.currentTime
+    const fadeEnd = now + FADE_IN_DURATION
+
+    try {
+      masterGain.value.gain.cancelScheduledValues(now)
+      masterGain.value.gain.setValueAtTime(0, now)
+      masterGain.value.gain.linearRampToValueAtTime(scene.masterVolume / 100, fadeEnd)
+    } catch {
+      // 忽略
+    }
+
+    for (const sceneTrack of scene.tracks) {
+      const gainNode = gainNodes.get(sceneTrack.id)
+      if (!gainNode) continue
+      try {
+        gainNode.gain.cancelScheduledValues(now)
+        gainNode.gain.setValueAtTime(0, now)
+        gainNode.gain.linearRampToValueAtTime(sceneTrack.volume / 100, fadeEnd)
+      } catch {
+        // 忽略
+      }
+    }
+
+    store.isGlobalPlaying = true
+  }
+
+  const switchToScene = async (scene: Scene) => {
+    if (isSwitchingScene) return
+    isSwitchingScene = true
+
+    initAudioContext()
+
+    // 确保 AudioContext 处于 running 状态，否则 currentTime 不前进，渐变也不会触发
+    if (audioContext.value?.state === 'suspended') {
+      try { await audioContext.value.resume() } catch { /* 忽略 */ }
+    }
+
+    try {
+      await fadeOutAllTracks()
+
+      // 应用场景状态（仅同步 store 数据，不直接操作音频节点）
+      store.applySceneState(scene)
+
+      await fadeInTracksForScene(scene)
+
+      ElMessage.success(`已切换到「${scene.name}」`)
+    } catch (error) {
+      console.error('场景切换失败:', error)
+      ElMessage.error('场景切换失败，请重试')
+    } finally {
+      isSwitchingScene = false
+    }
+  }
+
+  watch(() => store.masterVolume, (newVal) => {
+    // 场景切换期间由 fadeIn/fadeOut 直接控制 masterGain，跳过常规更新避免冲突
+    if (isSwitchingScene) return
+    updateMasterVolume(newVal)
+  })
 
   onUnmounted(() => {
     if (timerInterval) clearInterval(timerInterval)
@@ -458,6 +660,7 @@ export function useAudioEngine() {
     updateTrackVolume,
     toggleGlobalPlay,
     startTimer,
-    cancelTimer
+    cancelTimer,
+    switchToScene
   }
 }
