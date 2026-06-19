@@ -14,10 +14,12 @@
       </div>
     </header>
 
+    <SceneBar @switch-scene="switchToScene" />
+
     <main class="main-content" role="main" aria-label="主要内容区域">
       <div class="hero-section">
         <h2 role="heading" aria-level="2">打造您的睡眠环境</h2>
-        <p>混合环境音效，为您营造完美的放松与睡眠氛围。</p>
+        <p>混合环境音效，为您营造完美的放松与睡眠氛围。点击顶部场景栏可一键切换预设场景。</p>
       </div>
 
       <el-row :gutter="24" class="sound-grid" role="list" aria-label="音效列表">
@@ -45,6 +47,7 @@ import { useAudioStore } from '@/stores/audioStore'
 import { useAudioEngine } from '@/composables/useAudioEngine'
 import SoundCard from '@/components/SoundCard.vue'
 import PlayerBar from '@/components/PlayerBar.vue'
+import SceneBar from '@/components/SceneBar.vue'
 import { Moon } from '@element-plus/icons-vue'
 
 const store = useAudioStore()
@@ -54,11 +57,11 @@ const {
   updateTrackVolume,
   toggleGlobalPlay,
   startTimer,
-  cancelTimer
+  cancelTimer,
+  switchToScene
 } = useAudioEngine()
 
 onMounted(() => {
-  // 首次用户交互初始化 AudioContext
   document.addEventListener('click', () => initAudioContext(), { once: true })
 })
 </script>
