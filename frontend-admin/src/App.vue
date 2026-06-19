@@ -14,6 +14,11 @@
       </div>
     </header>
 
+    <SceneBar
+      :on-apply-scene="applyScene"
+      :on-get-current-tracks="getCurrentTrackStates"
+    />
+
     <main class="main-content" role="main" aria-label="主要内容区域">
       <div class="hero-section">
         <h2 role="heading" aria-level="2">打造您的睡眠环境</h2>
@@ -45,6 +50,7 @@ import { useAudioStore } from '@/stores/audioStore'
 import { useAudioEngine } from '@/composables/useAudioEngine'
 import SoundCard from '@/components/SoundCard.vue'
 import PlayerBar from '@/components/PlayerBar.vue'
+import SceneBar from '@/components/SceneBar.vue'
 import { Moon } from '@element-plus/icons-vue'
 
 const store = useAudioStore()
@@ -54,11 +60,12 @@ const {
   updateTrackVolume,
   toggleGlobalPlay,
   startTimer,
-  cancelTimer
+  cancelTimer,
+  applyScene,
+  getCurrentTrackStates
 } = useAudioEngine()
 
 onMounted(() => {
-  // 首次用户交互初始化 AudioContext
   document.addEventListener('click', () => initAudioContext(), { once: true })
 })
 </script>
